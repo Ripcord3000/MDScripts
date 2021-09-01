@@ -8,6 +8,7 @@ import java.awt.*;
 
 
 //VitoTrade 2/12/03
+//Modified by Ripcord 2021
 
 // this script will WorldTrade Vito style. 
 // it has the new string macro functionality, give it a try
@@ -29,13 +30,35 @@ import java.awt.*;
 // the script detects your swath game database directory (usually My Documents)
 // and saves the ugly file there, as VitoTrade-ugly-<gamename>.txt
 // ------------------------------------------------------------------------
-// new for this version... 
+// New in version 2003-02-12:
 // #1 speedometer reports credits earned per hour
 // #2 holoscan is working
 // #3 unattended mode works a lot better
 // #4 added more delay fig options, "Vitos favorite" means it drops
 // one toll fig in every sector, except for 20 offensive figs in empty sectors,
 // thus giving the sector a density of 100 hehehehehehheheheheh
+// ------------------------------------------------------------------------
+// New in version 2021-09-01:
+// - Added additional data to the stats pane:
+//   - Total credits made for this run
+//   - Experience earned
+//   - # Fighters killed
+//   - # Fighers dropped
+
+// Updated "deploy fighters" logic:
+//   - Simplified the "layfigs" logic, faster (doesn't do things like bother to re-drop figs which was just a waste of time)
+//   - Added an option to deploy every 5 sectors
+
+// - In aggressive mode, prefer sectors that have a few pesky figs.  Works as an "ungridder" while still trading if wanted.
+// - Fixed an issue where we'd try to avoid sectors with our OWN fighters in them.
+
+// - Fixed an issue where the script could hit a race condition and fail to move if the command prompt hadn't come back before we tried to move (non-speed mode)
+// - Fixed an issue where the loop would exit early thinking you were out of turns on unlimited-turn servers
+// - Fixed an issue where we'd try to move into avoided sectors.
+// - Added an "explore-only" option, letting you just explore, drop figs (gridding), kill figs (ungrid), VERY quickly (similar to SWATH world trade but smarter and faster)
+// - Moved a whole bunch of output, especially verbose, to the SWATH console instead of the main window
+// - Improved description/help
+// - Minor improvements to text output (additional info, spelling, formatting), etc.
 // ------------------------------------------------------------------------
 // Thanks to CSG who wrote the exploration WorldTrade script and 
 // whose code I learned from and borrowed to make this nonsense.
@@ -62,13 +85,23 @@ public class VitoTrade extends UserDefinedScript {
 	private Parameter m_speed;
 	private Parameter m_fedspace;
 	private Parameter m_agressive;
+	private Parameter m_explore;
 	
 	int scred,sexp,salign;
 	int lcred,lexp,lalign;
 	long stime,ltime;
+	int figsKilled, figsDropped;
 	
 	final JLabel label1 = new JLabel("Credits per hour:");
 	final JLabel label2 = new JLabel("$<computing>");
+	final JLabel label3 = new JLabel("Credits total:");
+	final JLabel label4 = new JLabel("<computing>");
+	final JLabel label5 = new JLabel("Net experience:");
+	final JLabel label6 = new JLabel("<computing>");
+	final JLabel label7 = new JLabel("Fighters killed:");
+	final JLabel label8 = new JLabel("<computing>");
+	final JLabel label9 = new JLabel("Fighters dropped:");
+	final JLabel label10 = new JLabel("<computing>");
 
 	public boolean runScript() throws Exception {
 		//put the parameters into their working storage
@@ -97,9 +130,17 @@ public class VitoTrade extends UserDefinedScript {
 	
 		JPanel panel = Tools.createJPanel();
 		JFrame frame = Tools.createJFrame("VitoTrade Status", 1, 1);
-     		panel.setLayout(new GridLayout(0, 2));
+		panel.setLayout(new GridLayout(0, 2));
 		panel.add(label1);
 		panel.add(label2);
+		panel.add(label3);
+		panel.add(label4);
+		panel.add(label5);
+		panel.add(label6);
+		panel.add(label7);
+		panel.add(label8);
+		panel.add(label9);
+		panel.add(label10);
 
 		frame.getContentPane().add(panel);
 		frame.pack();
@@ -144,7 +185,7 @@ public class VitoTrade extends UserDefinedScript {
 			uglyin.close();
 		}
 		else {
-			PrintText.exec("\n"+filespec+" not found, creating Ugliness...");
+			PrintTrace.exec("\n"+filespec+" not found, creating Ugliness...");
 			Arrays.fill(ugliness,0);
 			//there is no sector 0 so in ugliness terms.. it is very ugly
 			ugliness[0] = 999;
@@ -152,14 +193,18 @@ public class VitoTrade extends UserDefinedScript {
 			ugliness[1] = 20;
 			//set the URL
 			if (verbose) {
-				PrintText.exec("\nCreating "+filespec+"\n");
+				PrintTrace.exec("Creating "+filespec);
 			}
 		}
 
 		//DisplayCurrentInfo.exec();
 		loopcount=0;
-		while ((Swath.you.turns() > 50) || (Swath.you.turns() == 0)) {
+		PrintTrace.exec("Turns: "+Swath.you.turns());
+		int turns = Swath.you.turns();
+		while (turns > 100 || turns == 0) {
+			PrintTrace.exec("Starting next loop");
 			status();
+			turns = Swath.you.turns();
 			++loopcount;
 			speedstr = "";
 			//if we like to lay fighters
@@ -175,57 +220,60 @@ public class VitoTrade extends UserDefinedScript {
 						//and if we have fighters onboard
 						if (Swath.ship.fighters() > 0) {
 							//then lay a toll fighter down
-							if (speed) {
-								switch (layfigs) {
-									case 1:
-										SendString.exec("F"+Math.max(Swath.sector.fighters(),1)+"\rCTD");
-										break;
-									case 2:
-										if (Swath.getSector(whereami).portStatus() == Sector.PORT_AVAILABLE) {
-											SendString.exec("F"+Math.max(Swath.sector.fighters(),1)+"\rCTD");
-										}
-										break;
-									case 3:
-										if (Math.IEEEremainder(loopcount,2) == 0) {
-											SendString.exec("F"+Math.max(Swath.sector.fighters(),1)+"\rCTD");
-										}
-										break;
-									case 4:
-										if (Swath.getSector(whereami).density() == 0) {
-											SendString.exec("F"+Math.max(Swath.sector.fighters(),20)+"\rCoD");
-										}
-										else {
-											SendString.exec("F"+Math.max(Swath.sector.fighters(),1)+"\rCTD");
-										}
-										break;
-								}
+							int numToDrop = 0;
+							Boolean vitoDrop = false;
+							switch (layfigs) {
+								case 1:
+									numToDrop = 1;
+									break;
+								case 2:
+									if (Swath.getSector(whereami).portStatus() == Sector.PORT_AVAILABLE) {
+										numToDrop = 1;
+									}
+									break;
+								case 3:
+									if (Math.IEEEremainder(loopcount,2) == 0) {
+										numToDrop = 1;
+									}
+									break;
+								case 4:
+									if (Math.IEEEremainder(Swath.sector.sector(),5) == 0) {
+										numToDrop = 1;
+									}
+									break;
+								case 5:
+									if (Swath.getSector(whereami).density() == 0) {
+										numToDrop = 20;
+										vitoDrop = true;
+									}
+									else {
+										numToDrop = 1;
+									}
+									break;
 							}
-							else{
-								switch (layfigs) {
-									case 1:
-										DropTakeFighters.exec(Math.max(Swath.sector.fighters(),1),Swath.CORPORATE,Swath.TOLL_FTRS);
-										break;
-									case 2:
-										if (Swath.sector.portStatus() == Sector.PORT_AVAILABLE) {
-											DropTakeFighters.exec(Math.max(Swath.sector.fighters(),1),Swath.CORPORATE,Swath.TOLL_FTRS);
-										}
-										break;
-									case 3:
-										if (Math.IEEEremainder(loopcount,2) == 0) {
-											DropTakeFighters.exec(Math.max(Swath.sector.fighters(),1),Swath.CORPORATE,Swath.TOLL_FTRS);
-										}
-										break;
-									case 4:
-										if (Swath.sector.density() == 0) {
-											DropTakeFighters.exec(Math.max(Swath.sector.fighters(),20),Swath.CORPORATE,Swath.OFFENSIVE_FTRS);
-										}
-										else {
-											DropTakeFighters.exec(Math.max(Swath.sector.fighters(),1),Swath.CORPORATE,Swath.TOLL_FTRS);
-										}
-										break;
-								}
-								
+
+							if (numToDrop > 0) {
+								numToDrop = Math.max(Swath.sector.fighters(), numToDrop);
 							}
+
+
+							if (numToDrop > 0) {
+								if (speed) {
+									if (vitoDrop) {
+										SendString.exec("F"+numToDrop+"\rCoD");
+									} else {
+										SendString.exec("F"+numToDrop+"\rCTD");
+									}
+								} else {
+									if (vitoDrop) {
+										DropTakeFighters.exec(numToDrop, Swath.CORPORATE,Swath.OFFENSIVE_FTRS);
+									} else {
+										DropTakeFighters.exec(numToDrop, Swath.CORPORATE,Swath.TOLL_FTRS);
+									}
+								}
+								figsDropped += numToDrop;
+							}
+
 							while (Swath.main.prompt() != Swath.COMMAND_PROMPT) {
 								Thread.sleep(25);
 							}
@@ -286,13 +334,14 @@ public class VitoTrade extends UserDefinedScript {
 				pamt[1]=9999;
 				pamt[2]=9999;
 			}
-			if (verbose) {
-				PrintText.exec("\nPort amounts:\npamt[fuel]="+pamt[0]+"\npamt[org]="+pamt[1]+"\npamt[equ]="+pamt[2]+"\n");
+			if (verbose && !m_explore.getBoolean()) {
+				PrintTrace.exec("Port amounts:\npamt[fuel]="+pamt[0]+"\npamt[org]="+pamt[1]+"\npamt[equ]="+pamt[2]);
 			}
+
 			//here is the logic that figures out how much to trade of each product
 			//if we are in a sector with a port.
 			g = Swath.getSector(whereami).portClass();
-			
+
 			switch (g){
 
 				case 0: 
@@ -351,7 +400,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 1: //BBS
 					if (verbose) {
-						PrintText.exec("\nCase 1\n");
+						PrintTrace.exec("Case 1");
 					}
 					if (f-1 < pamt[0]) {
 						trf = -f;
@@ -381,7 +430,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 2: //BSB
 					if (verbose) {
-						PrintText.exec("\nCase 2\n");
+						PrintTrace.exec("Case 2");
 					}
 					if (f-1 < pamt[0]) {
 						trf = -f;
@@ -412,7 +461,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 3: //SBB
 					if (verbose) {
-						PrintText.exec("\nCase 3\n");
+						PrintTrace.exec("Case 3");
 					}
 					if (o-1 < pamt[1]) {
 						tro = -o;
@@ -444,7 +493,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 4: //SSB
 					if (verbose) {
-						PrintText.exec("\nCase 4\n");
+						PrintTrace.exec("Case 4");
 					}
 					if (e-1 < pamt[2]) {
 						tre = -e;
@@ -481,7 +530,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 5: //SBS
 					if (verbose) {
-						PrintText.exec("\nCase 5\n");	
+						PrintTrace.exec("Case 5");
 					}			
 					if (o-1 < pamt[1]) {
 						tro = -o;
@@ -516,7 +565,7 @@ public class VitoTrade extends UserDefinedScript {
 				
 				case 6: //BSS
 					if (verbose) {
-						PrintText.exec("\nCase 6\n");	
+						PrintTrace.exec("Case 6");
 					}		
 					if (f-1 < pamt[0]) {
 						trf = -f;
@@ -551,7 +600,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 7: //SSS
 					if (verbose) {
-						PrintText.exec("\nCase 7\n");	
+						PrintTrace.exec("Case 7");
 					}			
 					if (h - e - f - o < pamt[2]) {
 						tre = h - e - f - o;
@@ -589,7 +638,7 @@ public class VitoTrade extends UserDefinedScript {
 
 				case 8: //BBB
 					if (verbose) {
-						PrintText.exec("\nCase 8\n");	
+						PrintTrace.exec("Case 8");
 					}			
 					if (f-1 < pamt[0]) {
 						trf = -f;
@@ -619,7 +668,7 @@ public class VitoTrade extends UserDefinedScript {
 			//save ugly information every 10 sectors
 			if (Math.IEEEremainder(loopcount,10) == 0 ) {
 				if (verbose) {
-					PrintText.exec("\nSaving ugly.txt information...");
+					PrintTrace.exec("Saving ugly.txt information...");
 				}
 
 				uglyout = new BufferedWriter(new FileWriter(filespec));
@@ -630,78 +679,78 @@ public class VitoTrade extends UserDefinedScript {
 				uglyout.close();
 			
 				if (verbose) {
-					PrintText.exec("Done.\n");
+					PrintTrace.exec("Done.");
 				}
 			}
 			
 			if (verbose) {
-				PrintText.exec("\n Trade Fuel="+trf+", Trade Organics="+tro+", Trade Equipment="+tre+"\n");
+				PrintTrace.exec(" Trade Fuel="+trf+", Trade Organics="+tro+", Trade Equipment="+tre);
 			}
 			
-				
-			//Port and trade, but if trf = tro = tre = 0 then there is no reason to port
-			if((trf != 0) || (tro != 0) || (tre != 0)) {
-				if (speed) {
-					speedstr = "PT";
+			if (!m_explore.getBoolean()) {
+				//Port and trade, but if trf = tro = tre = 0 then there is no reason to port
+				if((trf != 0) || (tro != 0) || (tre != 0)) {
+					if (speed) {
+						speedstr = "PT";
 
-					//selling fuel first
-					if (trf < 0) {
-						speedstr = speedstr+(-trf)+"\r\r";
-					}
-					if (tro < 0) {
-						speedstr = speedstr+(-tro)+"\r\r";
-					}
-					if (tre < 0) {
-						speedstr = speedstr+(-tre)+"\r\r";
-					}
-					if (trf > 0) {
-						speedstr = speedstr+trf+"\r\r";
-					}
-					if ((trf == 0) && (pamt[0] > 0) && (Swath.getSector(whereami).portInfo()[0] == Sector.SELLING)) {
-						speedstr = speedstr+"0\r";
-					}
-					if (tro > 0) {
-						speedstr = speedstr+tro+"\r\r";
-					}	
-					if ((tro == 0) && (pamt[1] > 0) && (Swath.getSector(whereami).portInfo()[1] == Sector.SELLING)) {
-						speedstr = speedstr+"0\r";
-					}
-					
-					if (tre > 0) {
-						speedstr = speedstr+tre+"\r\r";
-					}
-					if ((tre == 0) && (pamt[2] > 0) && (Swath.getSector(whereami).portInfo()[2] == Sector.SELLING)) {
-						speedstr = speedstr+"0\r";
-					}
-					//later  SendString.exec(speedstr+"SDD");
-				}
-				else {
-					Trade.exec(trf,tro,tre);
-				}
-			}
-			
-			
-		
-			//if were string macroing lets display the string we just sent to the port
-			if (speed) {
-				if (verbose) {
-					if (speedstr.length() >0) {
-						String displayme="";
-						for (int zd=0;zd < speedstr.length();zd++) {
-							if (speedstr.substring(zd,zd+1).equals("\r")) {
-								displayme = displayme + "<enter>";
-							}
-							else {
-								displayme = displayme + speedstr.substring(zd,zd+1);
-							}
+						//selling fuel first
+						if (trf < 0) {
+							speedstr = speedstr+(-trf)+"\r\r";
 						}
-						PrintText.exec("\n\n\nWe traded with string -->"+displayme+"<---\n\n\n");
+						if (tro < 0) {
+							speedstr = speedstr+(-tro)+"\r\r";
+						}
+						if (tre < 0) {
+							speedstr = speedstr+(-tre)+"\r\r";
+						}
+						if (trf > 0) {
+							speedstr = speedstr+trf+"\r\r";
+						}
+						if ((trf == 0) && (pamt[0] > 0) && (Swath.getSector(whereami).portInfo()[0] == Sector.SELLING)) {
+							speedstr = speedstr+"0\r";
+						}
+						if (tro > 0) {
+							speedstr = speedstr+tro+"\r\r";
+						}	
+						if ((tro == 0) && (pamt[1] > 0) && (Swath.getSector(whereami).portInfo()[1] == Sector.SELLING)) {
+							speedstr = speedstr+"0\r";
+						}
+						
+						if (tre > 0) {
+							speedstr = speedstr+tre+"\r\r";
+						}
+						if ((tre == 0) && (pamt[2] > 0) && (Swath.getSector(whereami).portInfo()[2] == Sector.SELLING)) {
+							speedstr = speedstr+"0\r";
+						}
+						//later  SendString.exec(speedstr+"SDD");
 					}
 					else {
-						PrintText.exec("\n\n\nno trade macro string was generated...\n\n\n");
+						Trade.exec(trf,tro,tre);
 					}
 				}
-			}		
+				
+				
+				//if were string macroing lets display the string we just sent to the port
+				if (speed) {
+					if (verbose) {
+						if (speedstr.length() >0) {
+							String displayme="";
+							for (int zd=0;zd < speedstr.length();zd++) {
+								if (speedstr.substring(zd,zd+1).equals("\r")) {
+									displayme = displayme + "<enter>";
+								}
+								else {
+									displayme = displayme + speedstr.substring(zd,zd+1);
+								}
+							}
+							PrintTrace.exec("We traded with string -->"+displayme+"<---");
+						}
+						else {
+							PrintTrace.exec("No trade macro string was generated...");
+						}
+					}
+				}
+			} // Port and trade (if not exploring)
 			
 
 			
@@ -717,7 +766,7 @@ public class VitoTrade extends UserDefinedScript {
 			int adj[] = Swath.getSector(whereami).warpSectors();
 			int goodsect = 1;
 			if (verbose) {
-				PrintText.exec("\nInitializing: Setting goodsect=1\n");
+				PrintTrace.exec("Initializing: Setting goodsect=1");
 			}
 
 			if (Math.IEEEremainder(loopcount,20) == 0) {
@@ -751,42 +800,59 @@ public class VitoTrade extends UserDefinedScript {
 			
 
 			//PASS A: prefer xsb port if we have equipment and xbs port if we have organics
-			for (i=0;i<adj.length;i++) {
-				s = Swath.getSector(adj[i]);
-				h = s.portClass();
-				pamt = s.portAmounts();
-				if (Swath.ship.equipment() > 0) {
-					//if the sector has a xsb port
-					if ((h==2)||(h==4)) {
-						//if its not traded down
-						if ((pamt[0] == -1) || (pamt[1] > Swath.ship.holds()) && (pamt[2] > Swath.ship.holds())) {
-							//if it looks safe
-							if (safe(s)) {
-								//then its a good destination for us
-								goodsect = adj[i];
-								if (verbose) {
-									PrintText.exec("\nPass A: Changing goodsect="+adj[i]+"\n");
+			// And if we're not exploring
+			if (goodsect == 1 && !m_explore.getBoolean()) {
+				for (i=0;i<adj.length;i++) {
+					s = Swath.getSector(adj[i]);
+					h = s.portClass();
+					pamt = s.portAmounts();
+					if (Swath.ship.equipment() > 0) {
+						//if the sector has a xsb port
+						if ((h==2)||(h==4)) {
+							//if its not traded down
+							if ((pamt[0] == -1) || (pamt[1] > Swath.ship.holds()) && (pamt[2] > Swath.ship.holds())) {
+								//if it looks safe
+								if (safe(s)) {
+									//then its a good destination for us
+									goodsect = adj[i];
+									if (verbose) {
+										PrintTrace.exec("Pass A: Changing goodsect="+adj[i]+"");
+									}
+								}
+							}
+						}
+					}
+					else {
+						//if we have organics in our holds
+						if (Swath.ship.organics() > 0) {
+							//if the sector has a xbs port
+							if ((h==1) || (h == 5)) {
+								//if its not traded down 
+								if ((pamt[0] == -1) || (pamt[1] > Swath.ship.holds()) && (pamt[2] > Swath.ship.holds())) {
+									//if it looks safe
+									if (safe(s)) {
+									//then its a good destination for us
+									goodsect = adj[i];
+										if (verbose) {
+											PrintTrace.exec("Pass A: Changing goodsect="+adj[i]+" - xsb port");
+										}
+									}
 								}
 							}
 						}
 					}
 				}
-				else {
-					//if we have organics in our holds
-					if (Swath.ship.organics() > 0) {
-						//if the sector has a xbs port
-						if ((h==1) || (h == 5)) {
-							//if its not traded down 
-							if ((pamt[0] == -1) || (pamt[1] > Swath.ship.holds()) && (pamt[2] > Swath.ship.holds())) {
-								//if it looks safe
-								if (safe(s)) {
-								//then its a good destination for us
-								goodsect = adj[i];
-									if (verbose) {
-										PrintText.exec("\nPass A: Changing goodsect="+adj[i]+"\n");
-									}
-								}
-							}
+			} // Pass A
+
+			// PASS B:  If very aggressive, prefer any sector with other player fighters to kill
+			// ("ungrid")
+			if (goodsect == 1 && m_agressive.getBoolean()) {
+				for (i=0;i<adj.length;i++) {
+					s = Swath.getSector(adj[i]);
+					if (s.fighters() > 0 && !(s.ftrOwner().isYou() || s.ftrOwner().isYourCorporation()) && safe(s)) {
+						goodsect = adj[i];
+						if (verbose) {
+							PrintTrace.exec("Pass B: Changing goodsect="+adj[i]+" - taking out fighter");
 						}
 					}
 				}
@@ -802,17 +868,12 @@ public class VitoTrade extends UserDefinedScript {
 						if ((s.density() == 100) && (s.fighters() == 0)) {
 							goodsect = adj[i];
 							if (verbose) {
-								PrintText.exec("\nPass C: Changing goodsect="+adj[i]+"\n");
+								PrintTrace.exec("Pass C: Changing goodsect="+adj[i]+" - any unexplored with port");
 							}
 						}
 					}
 				}
 			}
-	
-
-
-
-
 		
 			//PASS E: if goodsect is still 1 then D didnt find anything good
 			//so now we just go to the unexplored sector with the maximum number of warps
@@ -826,15 +887,13 @@ public class VitoTrade extends UserDefinedScript {
 								warphighscore = s.warps();
 								goodsect = adj[i];
 								if (verbose) {
-									PrintText.exec("\nPass E: Changing goodsect="+adj[i]+"\n");
+									PrintTrace.exec("Pass E: Changing goodsect="+adj[i]+" - any unexplored");
 								}
 							}
 						}
 					}
 				}
 			}
-
-
 
 		
 
@@ -853,7 +912,7 @@ public class VitoTrade extends UserDefinedScript {
 			//to get the computer better at picking destinations 
 			if (goodsect == 1) {
 				if (verbose) {
-					PrintText.exec("\n<<<Resorting to pass Z>>>\n");
+					PrintTrace.exec("<<<Resorting to pass Z>>>");
 				}
 				if (Swath.sector.spaceName().equals("The Federation.")) {
 					uglylowscore = 999;
@@ -864,7 +923,7 @@ public class VitoTrade extends UserDefinedScript {
 				for (i=0;i<adj.length;i++) {
 					s = Swath.getSector(adj[i]);
 					if (verbose) {
-						PrintText.exec("\nUgliness of "+adj[i]+": "+ugliness[adj[i]]);
+						PrintTrace.exec("Ugliness of "+adj[i]+": "+ugliness[adj[i]]);
 				  	}
 					//never go to an unsafe sector
 					if (safe(s)) {
@@ -872,18 +931,18 @@ public class VitoTrade extends UserDefinedScript {
 							uglylowscore = ugliness[adj[i]];
 							goodsect = adj[i];
 							if (verbose) {
-								PrintText.exec("\nPass Z: Changing goodsect="+adj[i]+"\n");
+								PrintTrace.exec("Pass Z: Changing goodsect="+adj[i]+" - lowest ugliness");
 							}
 						}
 					}
 				}
-			}						
-					
+			}
+
 			//By now if goodsect is still 1 we might as well go to sector 1 and
 			//get furbed anyway! Unless we've already just visited one.
 			if ( (goodsect == class0port) && ((loopssinceclass0 < 500) || (!(fedspace)) )  ) {
 				if (verbose) {
-					PrintText.exec("\n\n\n\n <<<<<< Trying to go to class0, but was just there! >>>> \n\n\n\n");
+					PrintTrace.exec(" <<<<<< Trying to go to class0, but was just there! >>>> ");
 				}
 				adj = Swath.sector.warpSectors();
 				for (i=0;i<adj.length;i++) {
@@ -891,22 +950,22 @@ public class VitoTrade extends UserDefinedScript {
 					if (safe(s)) {
 						goodsect = adj[i];
 						if (verbose) {
-							PrintText.exec("\nPass Z: Changing goodsect="+adj[i]+"\n");
+							PrintTrace.exec("Pass Z: Changing goodsect="+adj[i]+"");
 						}
 					}
 					if (verbose) {
-						PrintText.exec((s.sector())+" is safe? "+(safe(s))+"\n");
+						PrintTrace.exec((s.sector())+" is safe? "+(safe(s))+"");
 					}
 				}
 
 				if (goodsect == class0port) {
 					
-						PrintText.exec("No safe sectors to move to. Dont want to go to class 0. ending\n");
+						PrintTrace.exec("No safe sectors to move to. Dont want to go to class 0. ending");
 						return true;
 					
 				}
 			
-			}	
+			}
 
 
 			//At this point we are moving to goodsect.
@@ -917,48 +976,56 @@ public class VitoTrade extends UserDefinedScript {
 
 
 			//issue warning if we are warping to an ugly sector	
-			if (ugliness[goodsect] > 3) {
+			if (ugliness[goodsect] > 6) {
 				SetTextMode.exec(SetTextMode.COLOR_WHITE, SetTextMode.COLOR_RED, SetTextMode.MODE_NORMAL);
 
 				PrintText.exec("\n <<<<<< WARNING: Ugliness of "+goodsect+" is "+ugliness[goodsect]+"!!!\n WATCH AND MAKE SURE YOU DO NOT STARTx LOOPING IN BAD SPACE >>>>>> \n");
-			}	
-	
+			}
+
 			if (goodsect != class0port) {
-				
+				int numSectFigs = 0;
+				Sector gs = Swath.getSector(goodsect);
+				if (gs.fighters() > 0 && !(gs.ftrOwner().isYou() || gs.ftrOwner().isYourCorporation())) {
+					numSectFigs = gs.fighters();
+				}
 				loopssinceclass0 = loopssinceclass0 + 1;
 				if (speed) {
 					SendString.exec(goodsect+"\r");
 					try{
-				WaitForText.exec(goodsect+"] (?=Help",5000);
-			}
-			catch (Exception te) {
-				PrintTrace.exec("Timeout, sending returns");
-				SendString.exec("\r\r\r\r\r\r/");
-				WaitForText.exec("AtmDt");
-			}
+						WaitForText.exec(goodsect+"] (?=Help",5000);
+					}
+					catch (Exception te) {
+						PrintTrace.exec("Timeout, sending returns");
+						SendString.exec("\r\r\r\r\r\r/");
+						WaitForText.exec("AtmDt");
+					}
 						
 				}
 				else {
+					Thread.sleep(50);
+					SendString.exec("\r");
+					WaitForPrompt.exec(Swath.COMMAND_PROMPT);
 					Move.exec(goodsect);
 				}
+				figsKilled += numSectFigs;
 
 			}
 			else {
-				PrintText.exec("\nWaiting 1 seconds\n");
-				PrintText.exec("\nMoving to Class 0 port at "+class0port+"\n");
+				PrintTrace.exec("Waiting 1 second");
+				PrintTrace.exec("Moving to Class 0 port at "+class0port+"");
 				Thread.sleep(1000);
 				Move.exec(goodsect);
 				loopssinceclass0 = 0;
 			}
-			
+
 			whereami=goodsect;	
 		}	
 		
-		PrintText.exec("Turns less than 50. Done.");
+		PrintText.exec("Turns less than 50 :" + turns + ". Done.");
 		return true;
 	}
 
-		public void status() throws Exception {
+	public void status() throws Exception {
 		int ecred = Swath.you.credits();
 		int eexp = Swath.you.experience();
 		int ealign = Swath.you.alignment();
@@ -979,9 +1046,12 @@ public class VitoTrade extends UserDefinedScript {
 		//PrintTrace.exec("Overall time in sec : "+nettime);
 		//PrintTrace.exec("Overall credits per hour: "+netcph);
 		label2.setText(netcph);
-
-
+		label4.setText(""+netcred);
+		label6.setText(""+netexp);
+		label8.setText(""+figsKilled);
+		label10.setText(""+figsDropped);
 	}
+
 	//this little bit determines whether it should be considered safe to enter a sector
 	//modify according to taste
 	public boolean safe(Sector s) throws Exception {
@@ -990,8 +1060,8 @@ public class VitoTrade extends UserDefinedScript {
 		boolean retme = false;
 		int dens = s.density();
 		if ((!(s.spaceName().equals("The Federation."))) || (fedspace)) {
-			if (!(s.anomaly())) {
-				if (((dens == 5 || dens == 105) && (agressive)) || dens == 0 || dens == 100 || dens == 1 || dens == 101 || (s.ftrOwner().isYourCorporation() && s.fighters() > 0) || (s.ftrOwner().isYou() && s.fighters() > 0) ) {
+			if (!(s.anomaly()) && !(s.isAvoided())) {
+				if (((dens == 5 || dens == 105) && (agressive)) || dens == 0 || dens == 100 || dens == 1 || dens == 101 || ((s.fighters() > 0 && s.fighters() < 100) && (s.ftrOwner().isYourCorporation() || (s.ftrOwner().isYou()) ))) {
 					if (s.busted() == null) {
 						retme = true;
 					}
@@ -1020,79 +1090,99 @@ public class VitoTrade extends UserDefinedScript {
  ***********************************************************************************************/
 
 
-        public String getName() {
-                return "VitoTrade World";
+	public String getName() {
+		return "VitoTrade World";
         }
+
 	public String getDescription() {
 		return "<html>"+
 			
-			"Vito Trade World 2/12/03 <p>"+ 
-			"this script will WorldTrade Vito style. <p>"+
-			"see the .java file for a commentary... <p>"+
-			"when selecting delay fig settings, the choice "+
+			"<p>Vito Trade World 2021-09-01 </p>"+
+			"<p>This script will WorldTrade Vito style. </p>"+
+			"<p><b>Deploy figs:</b><br>" +
+			"Drops fighters at the frequency you select.<br>" +
+			"Note the choice " +
 			"<b><font color=red>Vito's favorite</font></b> is a setting where 1 toll fig is dropped"+
 			" in every sector, except for completely empty sectors "+
 			" where it dropps 20 offensive figs, in order to give the sector"+
-			" a density of 100." +
-		
+			" a density of 100.</p>" +
+			"<p><b>Unattended mode:</b><br>" +
+			"Slightly more cautious about making mistakes, at the expense of speed.</p>" +
+			"<p><b>Speed Mode:</b><br>" +
+			"Issues macro strings for speed instead of SWATH primitives.  Slightly more likely to be interrupted." +
+			"If enabled, turn off haggling mode (no haggling will be done, but can interfere with the script)</p>" +
+			"<p><b>Aggressive mode:</b><br>" +
+			"Will cause you to attack sectors with a handful of fighters in them and clear them out.<br>" +
+			"In fact, in this mode you will PREFER those sectors.  Using in combination with the 'Explore' mode is a very" +
+			" effective anti-gridder</p>"+
+			"<p><b>Verbose mode:</b><br>" +
+			"Prints additional info to the SWATH console for debugging</p>" +
+			"<p><b>Do not trade, just explore:</b><br>" +
+			"Does just what it says.  VERY fast at exploring, gridding, anti-gridding.</p>" +
+
 			"</html>";
 	}
-        public boolean initScript() throws Exception {
 
+	public boolean initScript() throws Exception {
 
-
-              if (!atPrompt(Swath.COMMAND_PROMPT)) {
-                       PrintText.exec("\n\n>>>Get to the main command prompt<<<\n\n");
-                        return false;
+		if (!atPrompt(Swath.COMMAND_PROMPT)) {
+			PrintText.exec("\n\n>>>Get to the main command prompt<<<\n\n");
+			return false;
 	  	}
 
-		m_layfigs = new Parameter("Delay Figs?");
-		m_layfigs.setType(Parameter.CHOICE);
-		m_layfigs.addChoice(0, "Do not drop any fighters");
-		m_layfigs.addChoice(1, "1 toll fighter all sectors");
-		m_layfigs.addChoice(2, "1 toll fighter under ports only");
-		m_layfigs.addChoice(3, "1 toll fighter every other sector");
-		m_layfigs.addChoice(4, "Vitos favorite (see descrip.)");
-		m_layfigs.setCurrentChoice(4);
-		registerParam(m_layfigs);
+		m_layfigs = new Parameter("Deploy Figs?");
+			m_layfigs.setType(Parameter.CHOICE);
+			m_layfigs.addChoice(0, "Do not drop any fighters");
+			m_layfigs.addChoice(1, "1 toll fig, all sectors");
+			m_layfigs.addChoice(2, "1 toll fig, under ports only");
+			m_layfigs.addChoice(3, "1 toll fig, every other sector");
+			m_layfigs.addChoice(4, "1 toll fig, every 5th sector");
+			m_layfigs.addChoice(5, "Vitos favorite (see descrip)");
+			m_layfigs.setCurrentChoice(0);
+			registerParam(m_layfigs);
 
 
-                m_holoscan = new Parameter("Holoscan?");
-                m_holoscan.setType(Parameter.BOOLEAN);
-                m_holoscan.setBoolean(false);
-                registerParam(m_holoscan);
+		m_holoscan = new Parameter("Holoscan?");
+			m_holoscan.setType(Parameter.BOOLEAN);
+			m_holoscan.setBoolean(true);
+			registerParam(m_holoscan);
 
-                m_unattended = new Parameter("Unattended mode?");
-                m_unattended.setType(Parameter.BOOLEAN);
-                m_unattended.setBoolean(false);
-                registerParam(m_unattended);
+		m_unattended = new Parameter("Unattended mode?");
+			m_unattended.setType(Parameter.BOOLEAN);
+			m_unattended.setBoolean(false);
+			registerParam(m_unattended);
 
 
-                m_speed = new Parameter("Macro String for speed? (Turn haggling off!!)");
-                m_speed.setType(Parameter.BOOLEAN);
-                m_speed.setBoolean(true);
-                registerParam(m_speed);
+		m_speed = new Parameter("Speed mode (Turn haggling off!!)?");
+			m_speed.setType(Parameter.BOOLEAN);
+			m_speed.setBoolean(true);
+			registerParam(m_speed);
 
 
  		m_fedspace = new Parameter("Allow travel into Fedpsace?");
-                m_fedspace.setType(Parameter.BOOLEAN);
-                m_fedspace.setBoolean(false);
-                registerParam(m_fedspace);
+			m_fedspace.setType(Parameter.BOOLEAN);
+			m_fedspace.setBoolean(false);
+			registerParam(m_fedspace);
 
 	
-		m_agressive = new Parameter("Agressive mode (walk over enemy tollfigs)?");
-                m_agressive.setType(Parameter.BOOLEAN);
-                m_agressive.setBoolean(true);
-                registerParam(m_agressive);
+		m_agressive = new Parameter("Agressive mode?");
+			m_agressive.setType(Parameter.BOOLEAN);
+			m_agressive.setBoolean(true);
+			registerParam(m_agressive);
 
-                m_verbose = new Parameter("Be verbose?");
-                m_verbose.setType(Parameter.BOOLEAN);
-                m_verbose.setBoolean(false);
-                registerParam(m_verbose);
+		m_verbose = new Parameter("Be verbose?");
+			m_verbose.setType(Parameter.BOOLEAN);
+			m_verbose.setBoolean(false);
+			registerParam(m_verbose);
+
+		m_explore = new Parameter("Do not trade, just explore");
+			m_explore.setType(Parameter.BOOLEAN);
+			m_explore.setBoolean(false);
+			registerParam(m_explore);
+	
+			return true;
 
 
-            
-                return true;
         }
 
         public void endScript(boolean finished) {
